@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Callable, Optional
+from qiskit.circuit import Measure
 from qiskit import QuantumCircuit, ClassicalRegister, QuantumRegister
 from .hamiltonian import zzz_unitary
 
@@ -29,21 +30,21 @@ ScenarioHook = Callable[[QuantumCircuit, int], None]
 # hook signature: hook(qc, cycle_index)
 
 def build_core_circuit(p: CoreParams,
-                    hook: Optional[ScenarioHook] = None,
-                    measure_ancilla: bool = True,
-                    reset_ancilla: bool = True) -> QuantumCircuit:
-    """
-    Build a 3-qubit experiment circuit with:
-    prepare -> repeat [ U_ZZZ -> idle -> hook -> measure ancilla -> reset ancilla ]
-    Classical bits: n_cycles (store ancilla measurement each cycle).
-    """
+                       hook: Optional[ScenarioHook] = None,
+                       mode: str = "decoded",   # "state" | "decoded"
+                       reset_ancilla: bool = True) -> QuantumCircuit:
+    if mode not in ("state", "decoded"):
+        raise ValueError(f"Invalid mode: {mode}. Use 'state' or 'decoded'.")
+
+    measure_ancilla = (mode == "decoded")
+
     qc = QuantumCircuit(3, p.n_cycles if measure_ancilla else 0)
     prepare_initial_state(qc)
 
     U = zzz_unitary(p.theta)
 
     for k in range(p.n_cycles):
-        qc.append(U, [0,1,2])
+        qc.append(U, [0, 1, 2])
 
         # idle ticks baseline
         for _ in range(p.idle_ticks_data):
@@ -61,13 +62,17 @@ def build_core_circuit(p: CoreParams,
         if hook is not None:
             hook(qc, k)
 
+        # decoded mode: measure/reset ancilla
         if measure_ancilla:
             qc.measure(2, k)
-        if reset_ancilla:
-            qc.reset(2)
+            if reset_ancilla:
+                qc.reset(2)
+
+    # state mode: store density matrix for metrics.fidelity_data_2q
+    if mode == "state":
+        qc.save_density_matrix()
 
     return qc
-
 def build_core_circuit_with_syndrome(core_p, hook=None, n_cycles=None):
     """
     Build circuit that records ancilla measurement each cycle into a classical syndrome register.

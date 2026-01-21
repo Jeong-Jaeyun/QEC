@@ -22,9 +22,12 @@
 from dataclasses import dataclass
 from typing import Optional, Callable
 from qiskit import QuantumCircuit
-
 from core.circuit import CoreParams, ScenarioHook
 from core.noise import NoiseParams
+#from __future__ import annotations
+
+
+Hook = Callable[[QuantumCircuit, int], None]
 
 
 @dataclass
@@ -32,6 +35,7 @@ class NonLocalBufferParams:
     extra_anc_ticks: int = 3          # extra ancilla id ticks per cycle
     bridge_strength: int = 1          # how many times to apply bridging pattern per cycle
     bridge_mode: str = "zx"           # "zx" or "xx" variants
+    enabled: bool = True
 
 
 def make_nonlocal_buffer_hook(p: NonLocalBufferParams) -> ScenarioHook:
@@ -39,27 +43,36 @@ def make_nonlocal_buffer_hook(p: NonLocalBufferParams) -> ScenarioHook:
     Returns a hook(qc, k) that adds ancilla-mediated operations each cycle.
     """
     def hook(qc: QuantumCircuit, k: int) -> None:
-        # Extra ancilla "remote latency" ticks
-        for _ in range(p.extra_anc_ticks):
+        if not p.enabled:
+            return
+
+        # "remote latency" on ancilla
+        for _ in range(max(0, p.extra_anc_ticks)):
             qc.id(2)
 
-        # Bridging: ancilla mediates correlation between data qubits.
-        # The key: we intentionally leave some entanglement/correlation so ancilla noise leaks into data.
+        # ancilla-mediated bridging (intentionally no uncompute)
         for _ in range(max(1, p.bridge_strength)):
             if p.bridge_mode == "zx":
-                # Couple data->anc then anc->data in a way that propagates ancilla errors
                 qc.cx(0, 2)
                 qc.cz(2, 1)
-                # no uncompute
             elif p.bridge_mode == "xx":
                 qc.cx(0, 2)
                 qc.cx(2, 1)
             else:
-                # default fallback
+                # fallback
                 qc.cx(0, 2)
                 qc.cx(2, 1)
 
     return hook
+
+def make_hook(args=None, params: Optional[NonLocalBufferParams] = None) -> ScenarioHook:
+    """
+    scenarios/* 공통 엔트리.
+    compare.py에서 통일된 방식으로 호출 가능하게 만든다.
+    """
+    if params is None:
+        params = NonLocalBufferParams(enabled=True)
+    return make_nonlocal_buffer_hook(p=params)
 
 
 def override_core_params(core: CoreParams, p: NonLocalBufferParams) -> CoreParams:
@@ -76,7 +89,8 @@ def override_core_params(core: CoreParams, p: NonLocalBufferParams) -> CoreParam
 
 def override_noise_params(noise: NoiseParams,
                         anc_strength: float = 1.0,
-                        ro_anc: Optional[float] = None) -> NoiseParams:
+                        ro_anc: Optional[float] = None,
+                        ) -> NoiseParams:
     """
     Increase ancilla noise relative to baseline (represents remote buffer fragility).
     """

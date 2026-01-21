@@ -1,17 +1,14 @@
 import argparse
 import os
 import csv
-
 from qiskit_aer import AerSimulator
-
 from core.circuit import CoreParams, build_core_circuit, build_core_circuit_with_syndrome
 from core.noise import NoiseParams, build_noise_model
-
 from scenarios.base import make_hook as hook_s0
 from scenarios.nonlocal_buffer import make_hook as hook_s1
-from scenarios.topo_minimal import make_hook as hook_s2
+from scenarios.topo_minimal import make_hooks as hook_s2
+from core.metrics import fidelity_data_2q
 
-# S3는 "회로 hook"이 아니라 "디코더 정책"이 핵심이므로
 # hook은 S2와 동일(=syndrome logging 회로)
 # 디코더는 utils.logging에서 선택
 from utils.logging import (
@@ -61,7 +58,7 @@ def run_state_compare(args):
     H1 = hook_s1(args)
     # S2는 topo_minimal에서 "constraint only"와 "constraint+feedback"을 분리해둘 수 있음
     # 여기서는 일단 S2a/S2b를 모두 비교하도록 만든다.
-    H2a, H2b = hook_s2(args)  # (constraint-only, constraint+feedback)
+    H2a, H2b, Hlog = hook_s2(args)  # (constraint-only, constraint+feedback)
 
     # ----- simulator -----
     # state 기반에서는 density_matrix를 쓰는 게 명확
@@ -75,10 +72,10 @@ def run_state_compare(args):
         # build + run per scenario (각각 회로를 새로 만들어도 되고, hook만 다르게)
         # build_core_circuit(core_p, hook=..., ...) 형태로 통일하는 게 좋다.
         for label, hook in [("S0_BASE", H0), ("S1_NONLOCAL_BUFFER", H1), ("S2a_TOPO_MIN", H2a), ("S2b_TOPO_MIN", H2b)]:
-            qc = build_core_circuit(core_p, hook=hook)
+            qc = build_core_circuit(core_p, hook=hook, mode="state")
             result = sim.run(qc).result()
             # fidelity 계산은 너의 기존 방식(core.metrics or circuit helper)을 호출해야 함
-            fid = qc.metadata["fidelity_fn"](result)  # <- 너 프로젝트에 맞게 교체
+            fid = fidelity_data_2q(result, qc, data_qubits=(0, 1), ideal="00")  
             ys[label].append(fid)
 
         print(f"[state] link_mult={lm} | " + " ".join([f"{k}={ys[k][-1]:.6f}" for k in ys]))
@@ -107,9 +104,9 @@ def run_state_compare(args):
 def run_decoded_compare(args):
     """
     Decoded comparison:
-      - syndrome logging circuit
-      - qasm(automatic) + shots
-      - metric: decoded success probability
+    - syndrome logging circuit
+    - qasm(automatic) + shots
+    - metric: decoded success probability
     """
     os.makedirs("results", exist_ok=True)
 
@@ -127,7 +124,7 @@ def run_decoded_compare(args):
 
     # 회로 hook은 "로그 생성용"만 필요 (S2(A)와 동일한 회로를 사용)
     # topo_minimal.py에서 (reps=1, uncompute=False, feedback=False)로 hook을 리턴하도록 맞춰두는 게 깔끔
-    _, Hlog = hook_s2(args)  # hook_s2가 (constraint-only, log-only) 형태로도 리턴하도록 구성 권장
+    _, _, Hlog = hook_s2(args)  # hook_s2가 (constraint-only, log-only) 형태로도 리턴하도록 구성 권장
 
     # 디코더 정책
     dec_flat = decode_flat_majority
@@ -176,6 +173,9 @@ def run_decoded_compare(args):
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument("--config", type=str, default=None, help="scenario yaml (overlay). ex) config/topo.yaml")
+    p.add_argument("--base_config", type=str, default=None, help="base yaml. default: config/base.yaml if exists")
+
     p.add_argument("--mode", choices=["state", "decoded"], required=True)
 
     # common
@@ -202,8 +202,13 @@ def parse_args():
 
     # sweep points (고정 리스트)
     p.add_argument("--link_mults", type=float, nargs="+", default=[1.0, 1.5, 2.0, 3.0, 5.0, 8.0, 12.0])
-
-    return p.parse_args()
+    
+    args = p.parse_args()
+    
+    from utils.config import apply_cfg_to_args, load_config
+    cfg = load_config(args.base_config, args.config)
+    apply_cfg_to_args(args, cfg)
+    return args
 
 
 def main():

@@ -1,0 +1,6 @@
+scenario:
+  name: S2_TOPO_MINIMAL
+  module: scenarios.topo_minimal
+  entry: make_hooks
+  variant: S2b         # S2a | S2b | log
+  params: {}           # (지금은 make_hooks 내부 고정, 필요하면 확장)

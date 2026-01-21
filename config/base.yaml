@@ -1,0 +1,5 @@
+scenario:
+  name: S0_BASE
+  module: scenarios.base
+  entry: make_hook
+  params: {}

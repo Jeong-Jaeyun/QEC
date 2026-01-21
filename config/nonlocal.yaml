@@ -1,0 +1,9 @@
+scenario:
+  name: S1_NONLOCAL_BUFFER
+  module: scenarios.nonlocal_buffer
+  entry: make_hook
+  params:
+    extra_anc_ticks: 3
+    bridge_strength: 1
+    bridge_mode: "zx"
+    enabled: true

@@ -1,0 +1,12 @@
+scenario:
+  name: S3_BLOCKCHAIN_LIKE
+  module: scenarios.topo_minimal
+  entry: make_hooks
+  variant: log
+
+decode:
+  decoder: block_consensus   # flat | block_consensus | weighted | slashing
+  block_W: 4
+  tau: 0.2                   # slashing에서만 사용
+  ideal_data: "00"
+  flip_target: 0

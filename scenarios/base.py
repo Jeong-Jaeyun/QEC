@@ -1,12 +1,10 @@
-from typing import Callable, Optional
+from typing import Callable
+from qiskit import QuantumCircuit
+from core.circuit import ScenarioHook
 
-Hook = Callable[[object, int], None]
+Hook = Callable[[QuantumCircuit, int], None]
 
-def make_hook(args=None) -> Hook:
-    """
-    S0_BASE: no extra operations.
-    Returns a hook compatible with core.
-     """
-    def _hook(qc, cycle_idx: int):
-        return  # do nothing
+def make_hook(args=None) -> ScenarioHook:
+    def _hook(qc: QuantumCircuit, cycle_idx: int) -> None:
+        return
     return _hook
