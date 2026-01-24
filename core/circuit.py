@@ -29,10 +29,12 @@ def prepare_initial_state(qc: QuantumCircuit) -> None:
 ScenarioHook = Callable[[QuantumCircuit, int], None]
 # hook signature: hook(qc, cycle_index)
 
-def build_core_circuit(p: CoreParams,
-                       hook: Optional[ScenarioHook] = None,
-                       mode: str = "decoded",   # "state" | "decoded"
-                       reset_ancilla: bool = True) -> QuantumCircuit:
+def build_core_circuit(
+    p: CoreParams,
+    hook: Optional[ScenarioHook] = None,
+    mode: str = "decoded",   # "state" | "decoded"
+    reset_ancilla: bool = True,
+) -> QuantumCircuit:
     if mode not in ("state", "decoded"):
         raise ValueError(f"Invalid mode: {mode}. Use 'state' or 'decoded'.")
 
@@ -46,43 +48,36 @@ def build_core_circuit(p: CoreParams,
     for k in range(p.n_cycles):
         qc.append(U, [0, 1, 2])
 
-        # idle ticks baseline
         for _ in range(p.idle_ticks_data):
             qc.id(0); qc.id(1)
         for _ in range(p.idle_ticks_anc):
             qc.id(2)
 
-        # extra ticks (generic knobs)
         for _ in range(p.extra_data_ticks):
             qc.id(0); qc.id(1)
         for _ in range(p.extra_anc_ticks):
             qc.id(2)
 
-        # scenario hook (optional)
         if hook is not None:
             hook(qc, k)
 
-        # decoded mode: measure/reset ancilla
         if measure_ancilla:
             qc.measure(2, k)
             if reset_ancilla:
                 qc.reset(2)
 
-    # state mode: store density matrix for metrics.fidelity_data_2q
-    if mode == "state":
+    # only in state mode
+    if getattr(p, "save_density", False) and mode == "state":
         qc.save_density_matrix()
 
     return qc
-def build_core_circuit_with_syndrome(core_p, hook=None, n_cycles=None):
-    """
-    Build circuit that records ancilla measurement each cycle into a classical syndrome register.
-    Also measures data at the end.
 
-    Returns: QuantumCircuit with:
-        - quantum regs: 3 qubits
-        - classical regs:
-          * s[0..n_cycles-1] : ancilla syndrome bits
-          * d0, d1 : final data bits
+
+def build_core_circuit_with_syndrome(core_p: CoreParams, hook=None, n_cycles=None) -> QuantumCircuit:
+    """
+    Same core dynamics as build_core_circuit, but:
+      - logs ancilla measurement each cycle into s[0..n_cycles-1]
+      - measures data qubits at the end into d[0], d[1]
     """
     if n_cycles is None:
         n_cycles = core_p.n_cycles
@@ -90,21 +85,30 @@ def build_core_circuit_with_syndrome(core_p, hook=None, n_cycles=None):
     qreg = QuantumRegister(3, "q")
     sreg = ClassicalRegister(n_cycles, "s")
     dreg = ClassicalRegister(2, "d")
-    
     qc = QuantumCircuit(qreg, sreg, dreg)
 
-    # (초기 상태 준비는 기존 core와 동일하게 유지)
-    # 예: 데이터에 H or 준비 상태가 있다면 여기 그대로
-    # qc.h(0); qc.h(1) ... 등
+    prepare_initial_state(qc)
+    U = zzz_unitary(core_p.theta)
 
     for k in range(n_cycles):
+        qc.append(U, [0, 1, 2])
+
+        for _ in range(core_p.idle_ticks_data):
+            qc.id(0); qc.id(1)
+        for _ in range(core_p.idle_ticks_anc):
+            qc.id(2)
+
+        for _ in range(core_p.extra_data_ticks):
+            qc.id(0); qc.id(1)
+        for _ in range(core_p.extra_anc_ticks):
+            qc.id(2)
+
         if hook is not None:
             hook(qc, k)
 
         qc.measure(2, sreg[k])
         qc.reset(2)
 
-    # 마지막에 데이터 측정
     qc.measure(0, dreg[0])
     qc.measure(1, dreg[1])
     return qc

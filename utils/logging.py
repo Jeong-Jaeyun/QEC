@@ -168,3 +168,15 @@ def score_decoded_success(
         total += c
 
     return success / total if total else 0.0
+
+def parse_syndromes_from_counts(counts: dict) -> list[str]:
+    syndromes = []
+    for key, c in counts.items():
+        parts = key.split(maxsplit=1)
+        if len(parts) == 1:
+            # fallback: if only syndrome exists
+            s = parts[0].replace(" ", "")
+        else:
+            s = parts[1].replace(" ", "")
+        syndromes.extend([s] * c)
+    return syndromes

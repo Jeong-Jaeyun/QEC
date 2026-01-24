@@ -1,6 +1,8 @@
 from qiskit.quantum_info import DensityMatrix, Statevector, state_fidelity, partial_trace
 from qiskit import QuantumCircuit
 from .circuit import prepare_initial_state
+from utils.logging import parse_syndromes_from_counts
+
 
 def initial_data_density_matrix() -> DensityMatrix:
     qc = QuantumCircuit(3)
@@ -35,3 +37,18 @@ def fidelity_data_2q(result, circuit, data_qubits=(0, 1), ideal="00"):
         psi = Statevector.from_label(ideal)
 
     return float(state_fidelity(rho_red, psi))
+
+def syndrome_stats(counts: dict, n_cycles: int) -> dict:
+    syndromes = parse_syndromes_from_counts(counts)
+    total = len(syndromes)
+    if total == 0:
+        return {"detection_rate": 0.0, "false_negative": 0.0}
+
+    zeros = "0" * n_cycles
+    detected = sum(1 for s in syndromes if ("1" in s))
+    fn = sum(1 for s in syndromes if s == zeros)
+
+    return {
+        "detection_rate": detected / total,   # P(syndrome != 0)
+        "false_negative": fn / total,         # P(syndrome == 0)
+    }
