@@ -1,6 +1,7 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Callable, Dict, Tuple, Optional
+from typing import Dict, Optional
 
 
 # -------------------------
@@ -8,20 +9,57 @@ from typing import Callable, Dict, Tuple, Optional
 # -------------------------
 @dataclass(frozen=True)
 class ParsedShot:
-    d_bits: str  # length 2 (as stored in counts key slice)
-    s_bits: str  # length n_cycles
+    # Index-order bits (NOT Qiskit's printed order):
+    # - d_bits: d0 d1 d2 (data qubits q0,q1,q2)
+    # - s_bits: s0..s(2*n_cycles-1) where per cycle k:
+    #     s[2k]   = Z0Z1 parity (0=even, 1=odd)
+    #     s[2k+1] = Z1Z2 parity (0=even, 1=odd)
+    d_bits: str  # length 3
+    s_bits: str  # length 2*n_cycles
 
 
 def parse_counts_key_default(key: str, n_cycles: int) -> ParsedShot:
     """
-    Default parser aligned with your current experiments:
-    bits = d(2) + s(n_cycles)
-    where the key is returned by Qiskit get_counts().
+    Parser for repetition-code circuits built by core.circuit.build_core_circuit_with_syndrome().
+
+    Qiskit prints each classical register MSB->LSB and separates registers with spaces.
+    For our circuit (d:3 bits, s:2*n_cycles bits), typical key looks like:
+        "d2d1d0 s(2n-1)...s1s0"
+
+    This function returns index-order strings:
+        d_bits = d0d1d2
+        s_bits = s0...s(2n-1)
     """
-    bits = key.replace(" ", "")
-    d_bits = bits[:2]
-    s_bits = bits[2:2 + n_cycles]
-    return ParsedShot(d_bits=d_bits, s_bits=s_bits)
+    n_cycles = int(n_cycles)
+    if n_cycles <= 0:
+        raise ValueError(f"n_cycles must be >= 1, got {n_cycles}")
+
+    parts = key.strip().split()
+    d_group: str
+    s_group: str
+    s_len = 2 * n_cycles
+
+    if len(parts) == 2:
+        a, b = parts[0].replace(" ", ""), parts[1].replace(" ", "")
+        if len(a) == 3 and len(b) == s_len:
+            d_group, s_group = a, b
+        elif len(b) == 3 and len(a) == s_len:
+            d_group, s_group = b, a
+        else:
+            bits = (a + b).replace(" ", "")
+            if len(bits) < 3 + s_len:
+                raise ValueError(f"Invalid counts key: {key!r} (expected 3+{s_len} bits)")
+            d_group = bits[:3]
+            s_group = bits[3 : 3 + s_len]
+    else:
+        bits = key.replace(" ", "")
+        if len(bits) < 3 + s_len:
+            raise ValueError(f"Invalid counts key: {key!r} (expected 3+{s_len} bits)")
+        d_group = bits[:3]
+        s_group = bits[3 : 3 + s_len]
+
+    # Convert printed order (MSB->LSB) to index order (0->...).
+    return ParsedShot(d_bits=d_group[::-1], s_bits=s_group[::-1])
 
 
 # -------------------------
@@ -33,150 +71,174 @@ def majority(bits: str) -> int:
     return 1 if ones > zeros else 0  # tie -> 0
 
 
-def apply_correction_to_data(d_bits: str, corr: int, flip_target: int = 0) -> str:
+def decode_repetition_syndrome_majority(s_bits: str, n_cycles: int) -> Optional[int]:
     """
-    Minimal correction model:
-        - if corr==1, flip chosen data bit (0 or 1).
-    We keep consistent ordering with previous code:
-        d_bits = d1 d0  (2 chars)
-    Return decoded string with same convention used in scoring:
-        return d1 + d0
+    Decode a 3-qubit repetition code from repeated syndrome measurements.
+
+    We take a per-stabilizer majority vote over cycles to suppress measurement noise,
+    then map the (s01, s12) pair to a single-qubit X correction target:
+      s01 s12 -> target
+       0   0  -> None
+       1   0  -> 0
+       1   1  -> 1
+       0   1  -> 2
     """
-    if len(d_bits) != 2:
-        raise ValueError(f"d_bits must be length 2, got {d_bits}")
+    n_cycles = int(n_cycles)
+    if n_cycles <= 0:
+        raise ValueError(f"n_cycles must be >= 1, got {n_cycles}")
+    if len(s_bits) != 2 * n_cycles:
+        raise ValueError(f"s_bits must be length {2*n_cycles}, got {len(s_bits)}: {s_bits!r}")
 
-    d1, d0 = d_bits[0], d_bits[1]
-    if corr == 1:
-        if flip_target == 0:
-            d0 = "1" if d0 == "0" else "0"
-        else:
-            d1 = "1" if d1 == "0" else "0"
-    return d1 + d0
+    s01_bits = "".join(s_bits[2 * k] for k in range(n_cycles))
+    s12_bits = "".join(s_bits[2 * k + 1] for k in range(n_cycles))
+    s01 = majority(s01_bits)
+    s12 = majority(s12_bits)
+
+    if s01 == 0 and s12 == 0:
+        return None
+    if s01 == 1 and s12 == 0:
+        return 0
+    if s01 == 1 and s12 == 1:
+        return 1
+    return 2  # s01 == 0 and s12 == 1
 
 
-# -------------------------
-# Decoder policies
-# -------------------------
-def decode_flat_majority(s_bits: str) -> int:
-    """S2(A) baseline: majority over the whole syndrome sequence."""
-    return majority(s_bits)
-
-
-def decode_block_consensus(s_bits: str, W: int) -> int:
+def _block_consensus(bits: str, W: int) -> int:
     """
-    S3(MVP): split syndrome into blocks of length W
-        block_vote = majority(block)
-        consensus  = majority(block_vote list)
-    """
-    if W <= 0:
-        return decode_flat_majority(s_bits)
-
-    blocks = [s_bits[i:i+W] for i in range(0, len(s_bits), W) if len(s_bits[i:i+W]) > 0]
-    block_votes = [majority(b) for b in blocks]
-    ones = sum(block_votes)
-    zeros = len(block_votes) - ones
-    return 1 if ones > zeros else 0  # tie -> 0
-
-
-# ---- 확장: weighted consensus ----
-def block_vote_and_margin(block: str) -> Tuple[int, float]:
-    """
-    vote: majority(block)
-    margin: |#1-#0| / len(block)  in [0,1]
-    """
-    n = len(block)
-    if n == 0:
-        return 0, 0.0
-    ones = block.count("1")
-    zeros = n - ones
-    vote = 1 if ones > zeros else 0
-    margin = abs(ones - zeros) / n
-    return vote, margin
-
-
-def decode_weighted_consensus(s_bits: str, W: int) -> int:
-    """
-    S3-2: weighted consensus using block margin as weight.
-        score = sum(weight_i * (+1 if vote=1 else -1))
-        return 1 if score>0 else 0
+    Split a bitstring into blocks of length W and do majority vote per block,
+    then majority vote over block votes.
     """
     if W <= 0:
-        return decode_flat_majority(s_bits)
-
-    blocks = [s_bits[i:i+W] for i in range(0, len(s_bits), W) if len(s_bits[i:i+W]) > 0]
-    score = 0.0
-    for b in blocks:
-        vote, margin = block_vote_and_margin(b)
-        score += margin * (1.0 if vote == 1 else -1.0)
-    return 1 if score > 0 else 0  # tie -> 0
+        return majority(bits)
+    blocks = [bits[i : i + W] for i in range(0, len(bits), W) if len(bits[i : i + W]) > 0]
+    votes = [majority(b) for b in blocks]
+    return 1 if sum(votes) > (len(votes) - sum(votes)) else 0  # tie -> 0
 
 
-# ---- 확장: slashing consensus ----
-def decode_slashing_consensus(s_bits: str, W: int, tau: float = 0.2) -> int:
+def decode_repetition_syndrome_block_consensus(s_bits: str, n_cycles: int, W: int) -> Optional[int]:
     """
-    S3-3: slashing/pruning low-confidence blocks.
-        - compute (vote, margin) per block
-        - discard if margin < tau
-        - consensus by majority on remaining votes
-        - if all discarded -> fallback to flat majority
+    Block-consensus variant of decode_repetition_syndrome_majority.
+    We run block consensus on each stabilizer stream (s01, s12) separately.
     """
-    if W <= 0:
-        return decode_flat_majority(s_bits)
+    n_cycles = int(n_cycles)
+    if n_cycles <= 0:
+        raise ValueError(f"n_cycles must be >= 1, got {n_cycles}")
+    if len(s_bits) != 2 * n_cycles:
+        raise ValueError(f"s_bits must be length {2*n_cycles}, got {len(s_bits)}: {s_bits!r}")
 
-    blocks = [s_bits[i:i+W] for i in range(0, len(s_bits), W) if len(s_bits[i:i+W]) > 0]
-    votes = []
-    for b in blocks:
-        vote, margin = block_vote_and_margin(b)
-        if margin >= tau:
-            votes.append(vote)
+    s01_bits = "".join(s_bits[2 * k] for k in range(n_cycles))
+    s12_bits = "".join(s_bits[2 * k + 1] for k in range(n_cycles))
+    s01 = _block_consensus(s01_bits, W=W)
+    s12 = _block_consensus(s12_bits, W=W)
 
-    if len(votes) == 0:
-        return decode_flat_majority(s_bits)
+    if s01 == 0 and s12 == 0:
+        return None
+    if s01 == 1 and s12 == 0:
+        return 0
+    if s01 == 1 and s12 == 1:
+        return 1
+    return 2
 
-    ones = sum(votes)
-    zeros = len(votes) - ones
-    return 1 if ones > zeros else 0
+
+def apply_x_correction(d_bits: str, target: Optional[int]) -> str:
+    """
+    Apply an X correction (bit flip) to the chosen data index, in post-processing.
+    d_bits is index order: d0 d1 d2.
+    """
+    if len(d_bits) != 3:
+        raise ValueError(f"d_bits must be length 3, got {d_bits!r}")
+    if target is None:
+        return d_bits
+    if target not in (0, 1, 2):
+        raise ValueError(f"target must be one of 0,1,2 or None, got {target!r}")
+
+    out = list(d_bits)
+    out[target] = "1" if out[target] == "0" else "0"
+    return "".join(out)
+
+
+def decode_logical_bit_majority(d_bits: str) -> str:
+    """
+    Decode logical Z-basis bit from a 3-qubit repetition code by majority vote.
+    """
+    return "1" if majority(d_bits) == 1 else "0"
 
 
 # -------------------------
 # Scoring
 # -------------------------
-DecoderFn = Callable[[str], int]
-
-
-def score_decoded_success(
+def score_logical_success(
     counts: Dict[str, int],
     n_cycles: int,
-    decoder: DecoderFn,
-    ideal_data: str = "00",
-    flip_target: int = 0,
-    parser: Callable[[str, int], ParsedShot] = parse_counts_key_default,
+    ideal_logical: str = "0",
 ) -> float:
     """
-    Compute decoded success probability from raw get_counts() output.
+    Success probability of the *decoded logical bit* for Z-basis logical states ("0" or "1").
+
+    Decoding pipeline per shot:
+    - parse (d_bits, s_bits)
+    - syndrome majority -> correction target (optional)
+    - apply correction to data bits (post-processing)
+    - majority vote on corrected data bits -> logical bit
     """
+    ideal_logical = str(ideal_logical).strip()
+    if ideal_logical not in ("0", "1"):
+        raise ValueError(f"ideal_logical must be '0' or '1', got {ideal_logical!r}")
+
     success = 0
     total = 0
-
     for key, c in counts.items():
-        parsed = parser(key, n_cycles)
-        corr = decoder(parsed.s_bits)
-        decoded = apply_correction_to_data(parsed.d_bits, corr, flip_target=flip_target)
+        parsed = parse_counts_key_default(key, n_cycles)
+        target = decode_repetition_syndrome_majority(parsed.s_bits, n_cycles=n_cycles)
+        corrected = apply_x_correction(parsed.d_bits, target)
+        logical = decode_logical_bit_majority(corrected)
 
-        if decoded == ideal_data:
+        if logical == ideal_logical:
             success += c
         total += c
 
     return success / total if total else 0.0
 
-def parse_syndromes_from_counts(counts: dict) -> list[str]:
-    syndromes = []
+
+def score_raw_majority_success(
+    counts: Dict[str, int],
+    n_cycles: int,
+    ideal_logical: str = "0",
+) -> float:
+    """
+    Baseline: ignore syndrome bits and decode logical bit by majority vote on raw data measurement.
+    """
+    ideal_logical = str(ideal_logical).strip()
+    if ideal_logical not in ("0", "1"):
+        raise ValueError(f"ideal_logical must be '0' or '1', got {ideal_logical!r}")
+
+    success = 0
+    total = 0
     for key, c in counts.items():
-        parts = key.split(maxsplit=1)
-        if len(parts) == 1:
-            # fallback: if only syndrome exists
-            s = parts[0].replace(" ", "")
+        parsed = parse_counts_key_default(key, n_cycles)
+        logical = decode_logical_bit_majority(parsed.d_bits)
+        if logical == ideal_logical:
+            success += c
+        total += c
+    return success / total if total else 0.0
+
+
+def parse_syndromes_from_counts(counts: dict) -> list[str]:
+    """
+    Extract only the syndrome register substring (index order) from get_counts() output.
+    Useful for quick observability stats.
+    """
+    syndromes: list[str] = []
+    for key, c in counts.items():
+        parts = key.strip().split()
+        if len(parts) == 2:
+            a, b = parts[0], parts[1]
+            s_group = b if len(b) != 3 else a
+            syndromes.extend([s_group[::-1]] * c)
+        elif len(parts) == 1:
+            syndromes.extend([parts[0][::-1]] * c)
         else:
-            s = parts[1].replace(" ", "")
-        syndromes.extend([s] * c)
+            bits = key.replace(" ", "")
+            if len(bits) > 3:
+                syndromes.extend([bits[3:][::-1]] * c)
     return syndromes

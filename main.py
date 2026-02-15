@@ -1,36 +1,115 @@
-import numpy as np
-from qiskit_aer import AerSimulator
-from qiskit.quantum_info import DensityMatrix
-from core.circuit import CoreParams, build_core_circuit
+from __future__ import annotations
+
+import argparse
+from typing import Optional
+
+from utils.env_check import require_typing_extensions_self
+
+require_typing_extensions_self(package="qiskit")
+
+from core.circuit import CoreParams, build_core_circuit_with_syndrome
+from core.metrics import syndrome_stats
 from core.noise import NoiseParams, build_noise_model
-from core.metrics import data_fidelity_from_density_matrix
+from utils.logging import score_logical_success, score_raw_majority_success
 
-def run_once(core_p: CoreParams, noise_p: NoiseParams, shots: int = 2000, seed: int = 11):
-    nm = build_noise_model(noise_p)
-    sim = AerSimulator(method="density_matrix", noise_model=nm, seed_simulator=seed)
 
-    qc = build_core_circuit(core_p, hook=None, measure_ancilla=True, reset_ancilla=True)
-    qc.save_density_matrix()
+def _try_make_simulator(*, noise_model=None, seed: Optional[int] = None):
+    try:
+        from qiskit_aer import AerSimulator
 
-    res = sim.run(qc, shots=shots).result()
-    rho = DensityMatrix(res.data(qc)["density_matrix"])
-    fid = data_fidelity_from_density_matrix(rho)
-    return fid
+        return AerSimulator(method="automatic", noise_model=noise_model, seed_simulator=seed)
+    except ImportError:
+        from qiskit.providers.basic_provider import BasicSimulator
+
+        if noise_model is not None:
+            raise ImportError(
+                "qiskit-aer is required for noisy simulation. Install with: pip install qiskit-aer"
+            )
+        return BasicSimulator()
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="3-qubit repetition (bit-flip) code demo")
+
+    p.add_argument("--logical_state", type=str, default="0", help="logical input on q0: 0,1,+,-")
+    p.add_argument("--n_cycles", type=int, default=3, help="number of repeated syndrome-extraction rounds")
+    p.add_argument("--shots", type=int, default=2000)
+    p.add_argument("--seed", type=int, default=11)
+
+    # Deterministic error injection (useful even without Aer noise)
+    p.add_argument("--inject_x", action="store_true", help="inject a single X error deterministically")
+    p.add_argument("--inject_target", type=int, default=0, choices=[0, 1, 2], help="data qubit index to flip")
+    p.add_argument("--inject_cycle", type=int, default=0, help="cycle index to inject the error at")
+
+    # Optional Aer noise model
+    p.add_argument("--noise", action="store_true", help="enable Aer noise model (requires qiskit-aer)")
+    p.add_argument("--channel", choices=["bitflip", "depolarizing"], default="bitflip")
+    p.add_argument("--p1_data", type=float, default=0.001)
+    p.add_argument("--p1_anc", type=float, default=0.001)
+    p.add_argument("--p2_data_data", type=float, default=0.002)
+    p.add_argument("--p2_data_anc", type=float, default=0.005)
+    p.add_argument("--pid_data", type=float, default=0.001)
+    p.add_argument("--pid_anc", type=float, default=0.001)
+    p.add_argument("--ro_anc", type=float, default=0.01)
+    p.add_argument("--ro_data", type=float, default=0.0)
+
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    if args.inject_cycle < 0:
+        raise ValueError("--inject_cycle must be >= 0")
+
+    def hook(qc, k: int) -> None:
+        if args.inject_x and k == args.inject_cycle:
+            qc.x(args.inject_target)
+
+    core_p = CoreParams(
+        n_cycles=args.n_cycles,
+        idle_ticks_data=1,
+        idle_ticks_anc=0,
+        logical_state=args.logical_state,
+    )
+
+    nm = None
+    if args.noise:
+        noise_p = NoiseParams(
+            channel=args.channel,
+            p1_data=args.p1_data,
+            p1_anc=args.p1_anc,
+            p2_data_data=args.p2_data_data,
+            p2_data_anc=args.p2_data_anc,
+            pid_data=args.pid_data,
+            pid_anc=args.pid_anc,
+            ro_anc=args.ro_anc,
+            ro_data=args.ro_data,
+        )
+        nm = build_noise_model(noise_p)
+
+    sim = _try_make_simulator(noise_model=nm, seed=args.seed)
+
+    qc = build_core_circuit_with_syndrome(core_p, hook=hook, n_cycles=core_p.n_cycles, measure_data=True)
+    result = sim.run(qc, shots=args.shots).result()
+    counts = result.get_counts(qc)
+
+    print("counts (top 10):")
+    for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]:
+        print(f"  {k}: {v}")
+
+    if args.logical_state in ("0", "1"):
+        raw = score_raw_majority_success(counts, core_p.n_cycles, ideal_logical=args.logical_state)
+        qec = score_logical_success(counts, core_p.n_cycles, ideal_logical=args.logical_state)
+        print(f"raw_majority_success:  {raw:.6f}")
+        print(f"syndrome_decode_success: {qec:.6f}")
+    else:
+        print("logical_state is not Z-basis; decoded success metric is skipped (use --logical_state 0/1).")
+
+    stats = syndrome_stats(counts, core_p.n_cycles)
+    print(f"syndrome detection_rate: {stats['detection_rate']:.4f}")
+    print(f"syndrome false_negative: {stats['false_negative']:.4f}")
+
 
 if __name__ == "__main__":
-    core_p = CoreParams(theta=0.20, n_cycles=20)
-
-    # baseline
-    base = NoiseParams(p1_data=0.001, p1_anc=0.001, pid_data=0.001, pid_anc=0.001, ro_anc=0.01)
-    fid0 = run_once(core_p, base)
-    print("baseline fidelity:", fid0)
-
-    # ancilla-only harsher noise (this MUST change fidelity if coupling exists)
-    anc_bad = NoiseParams(p1_data=0.001, p1_anc=0.03, pid_data=0.001, pid_anc=0.03, ro_anc=0.10)
-    fid1 = run_once(core_p, anc_bad)
-    print("ancilla harsher fidelity:", fid1)
-
-    # data-only harsher noise
-    data_bad = NoiseParams(p1_data=0.03, p1_anc=0.001, pid_data=0.03, pid_anc=0.001, ro_anc=0.01)
-    fid2 = run_once(core_p, data_bad)
-    print("data harsher fidelity:", fid2)
+    main()

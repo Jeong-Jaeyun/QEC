@@ -22,8 +22,8 @@
 from dataclasses import dataclass
 from typing import Optional, Callable
 from qiskit import QuantumCircuit
-from core.circuit import CoreParams, ScenarioHook
-from core.noise import NoiseParams
+from core.circuit import ScenarioHook
+from core.hamiltonian import buffer_bus_unitary_3q
 #from __future__ import annotations
 
 
@@ -34,8 +34,19 @@ Hook = Callable[[QuantumCircuit, int], None]
 class NonLocalBufferParams:
     extra_anc_ticks: int = 3          # extra ancilla id ticks per cycle
     bridge_strength: int = 1          # how many times to apply bridging pattern per cycle
-    bridge_mode: str = "zx"           # "zx" or "xx" variants
+    bridge_mode: str = "zx"           # "zx" | "xx" | "ham_bus"
     enabled: bool = True
+
+    # Which data qubits to connect via the buffer (q3).
+    d_src: int = 0
+    d_dst: int = 1
+
+    # Hamiltonian/bus parameters (used when bridge_mode == "ham_bus").
+    # Qubit ordering for the unitary is (d_src, buffer, d_dst).
+    ham_g1: float = 0.25
+    ham_g2: float = 0.25
+    ham_detuning: float = 2.0
+    ham_time: float = 1.0
 
 
 def make_nonlocal_buffer_hook(p: NonLocalBufferParams) -> ScenarioHook:
@@ -48,20 +59,32 @@ def make_nonlocal_buffer_hook(p: NonLocalBufferParams) -> ScenarioHook:
 
         # "remote latency" on ancilla
         for _ in range(max(0, p.extra_anc_ticks)):
-            qc.id(2)
+            qc.id(3)
 
         # ancilla-mediated bridging (intentionally no uncompute)
         for _ in range(max(1, p.bridge_strength)):
             if p.bridge_mode == "zx":
-                qc.cx(0, 2)
-                qc.cz(2, 1)
+                qc.cx(0, 3)
+                qc.cz(3, 1)
             elif p.bridge_mode == "xx":
-                qc.cx(0, 2)
-                qc.cx(2, 1)
+                qc.cx(0, 3)
+                qc.cx(3, 1)
+            elif p.bridge_mode == "ham_bus":
+                # Physical-ish buffer bus model:
+                #   H = sum_i g_i (a_i^dagger a_b + a_b^dagger a_i) + (detuning/2) Z_b
+                # No direct data-data coupling; energy exchange is mediated only by the buffer.
+                U = buffer_bus_unitary_3q(
+                    g1=p.ham_g1,
+                    g2=p.ham_g2,
+                    t=p.ham_time,
+                    detuning_b=p.ham_detuning,
+                    label="U_BUS",
+                )
+                qc.append(U, [p.d_src, 3, p.d_dst])
             else:
                 # fallback
-                qc.cx(0, 2)
-                qc.cx(2, 1)
+                qc.cx(0, 3)
+                qc.cx(3, 1)
 
     return hook
 
@@ -73,31 +96,3 @@ def make_hook(args=None, params: Optional[NonLocalBufferParams] = None) -> Scena
     if params is None:
         params = NonLocalBufferParams(enabled=True)
     return make_nonlocal_buffer_hook(p=params)
-
-
-def override_core_params(core: CoreParams, p: NonLocalBufferParams) -> CoreParams:
-    # Keep core immutable: return a modified copy
-    return CoreParams(
-        theta=core.theta,
-        n_cycles=core.n_cycles,
-        idle_ticks_data=core.idle_ticks_data,
-        idle_ticks_anc=core.idle_ticks_anc,
-        extra_anc_ticks=core.extra_anc_ticks + p.extra_anc_ticks,
-        extra_data_ticks=core.extra_data_ticks,
-    )
-
-
-def override_noise_params(noise: NoiseParams,
-                        anc_strength: float = 1.0,
-                        ro_anc: Optional[float] = None,
-                        ) -> NoiseParams:
-    """
-    Increase ancilla noise relative to baseline (represents remote buffer fragility).
-    """
-    return NoiseParams(
-        p1_data=noise.p1_data,
-        p1_anc=noise.p1_anc * anc_strength,
-        pid_data=noise.pid_data,
-        pid_anc=noise.pid_anc * anc_strength,
-        ro_anc=(noise.ro_anc if ro_anc is None else ro_anc),
-    )

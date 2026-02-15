@@ -1,54 +1,58 @@
-from qiskit.quantum_info import DensityMatrix, Statevector, state_fidelity, partial_trace
+from __future__ import annotations
+
 from qiskit import QuantumCircuit
-from .circuit import prepare_initial_state
+from qiskit.quantum_info import DensityMatrix, Statevector, partial_trace, state_fidelity
+
+from core.circuit import encode_repetition_3, prepare_logical_state
 from utils.logging import parse_syndromes_from_counts
 
 
-def initial_data_density_matrix() -> DensityMatrix:
+def initial_encoded_density_matrix(logical_state: str = "+") -> DensityMatrix:
+    """
+    Ideal encoded 3-qubit repetition-code state on 3 data qubits (no ancilla).
+    """
     qc = QuantumCircuit(3)
-    prepare_initial_state(qc)
+    prepare_logical_state(qc, logical_state)
+    encode_repetition_3(qc)
     sv = Statevector.from_instruction(qc)
-    rho = DensityMatrix(sv)
-    rho_data = partial_trace(rho, [2])  # trace out ancilla
-    return DensityMatrix(rho_data)
+    return DensityMatrix(sv)
 
-def data_fidelity_from_density_matrix(rho_final: DensityMatrix) -> float:
-    rho_data_final = partial_trace(rho_final, [2])
-    rho_data_init = initial_data_density_matrix()
-    fid = state_fidelity(DensityMatrix(rho_data_final), rho_data_init)
-    return float(fid)
 
-def fidelity_data_2q(result, circuit, data_qubits=(0, 1), ideal="00"):
+def data_fidelity_from_density_matrix(
+    rho_final: DensityMatrix,
+    *,
+    data_qubits: tuple[int, ...] = (0, 1, 2),
+    logical_state: str = "+",
+) -> float:
     """
-    AerSimulator(method='density_matrix') 결과에서,
-    data_qubits에 대한 reduced density matrix를 뽑아 |ideal><ideal| 과 fidelity 계산.
+    Compute fidelity between a final multi-qubit state and the ideal encoded data state.
+    - If rho_final includes extra ancilla qubits, we trace them out.
     """
-    rho_full = result.data(0)["density_matrix"]
-    rho_full = DensityMatrix(rho_full)
+    n = rho_final.num_qubits
+    keep = set(data_qubits)
+    traced_out = [q for q in range(n) if q not in keep]
+    rho_data_final = partial_trace(rho_final, traced_out) if traced_out else rho_final
+    rho_data_init = initial_encoded_density_matrix(logical_state=logical_state)
+    return float(state_fidelity(DensityMatrix(rho_data_final), rho_data_init))
 
-    # 부분계 추출
-    traced_out = [q for q in range(rho_full.num_qubits) if q not in data_qubits]
-    rho_red = partial_trace(rho_full, traced_out)
-    
-    # ideal 상태
-    if ideal == "00":
-        psi = Statevector.from_label("00")
-    else:
-        psi = Statevector.from_label(ideal)
-
-    return float(state_fidelity(rho_red, psi))
 
 def syndrome_stats(counts: dict, n_cycles: int) -> dict:
+    """
+    Simple observability stats from get_counts() output.
+    - detection_rate: P(any syndrome bit == 1) over the whole logged sequence
+    - false_negative: P(all syndrome bits == 0)
+    """
     syndromes = parse_syndromes_from_counts(counts)
     total = len(syndromes)
     if total == 0:
         return {"detection_rate": 0.0, "false_negative": 0.0}
 
-    zeros = "0" * n_cycles
+    zeros = "0" * (2 * int(n_cycles))
     detected = sum(1 for s in syndromes if ("1" in s))
     fn = sum(1 for s in syndromes if s == zeros)
 
     return {
-        "detection_rate": detected / total,   # P(syndrome != 0)
-        "false_negative": fn / total,         # P(syndrome == 0)
+        "detection_rate": detected / total,
+        "false_negative": fn / total,
     }
+

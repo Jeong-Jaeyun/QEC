@@ -1,19 +1,38 @@
 """
-Scenario 2 (MVP): 3큐비트 하의 위상 기하학적 최소 아날로그 (Topological-minimal analogue)
+Scenario hooks for the 3-qubit repetition (bit-flip) code.
 
-구현 내용:
-- 반복적인 Z-패리티 추출:
-    데이터 큐비트(q0, q1)의 Z-패리티를 보조 큐비트(q2)로 반복해서 추출
-- 선택적 최소 피드백:
-    만약 증후군(syndrome)이 1 이면, 하나의 데이터 큐비트에 국소적 교정(local correction)을 적용
+The core circuit (core.circuit.build_core_circuit_with_syndrome) already performs:
+1) Encode |psi> -> alpha|000> + beta|111> on data qubits (q0,q1,q2)
+2) Repeated stabilizer measurements per cycle:
+   - Z0Z1 parity -> syndrome bit s[2k]
+   - Z1Z2 parity -> syndrome bit s[2k+1]
+   using a single reusable ancilla q3
+3) Final data measurement into d[0..2]
 
-이 파일은 시나리오 훅(hook)을 'core.circuit'에서 요구하는 인터페이스로 제공한다.
+This file keeps the older "make_hooks" API used by experiments, but the hooks here
+are now focused on injecting simple faults for demonstration/debugging.
 """
 
+from __future__ import annotations
+
+import os
+import sys
 from dataclasses import dataclass
 from typing import Callable, Tuple
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from utils.env_check import require_typing_extensions_self
+
+require_typing_extensions_self(package="qiskit")
+
 from qiskit import QuantumCircuit
+from qiskit.circuit.library import XXPlusYYGate
+
 from core.circuit import ScenarioHook
+from core.circuit import encode_repetition_3, prepare_logical_state
 
 
 Hook = Callable[[QuantumCircuit, int], None]
@@ -21,80 +40,97 @@ Hook = Callable[[QuantumCircuit, int], None]
 
 @dataclass(frozen=True)
 class TopoMinimalParams:
-    # how many parity-check patterns per cycle
-    check_reps: int = 1
-
-    # uncompute ancilla after parity encode
-    uncompute: bool = True
-
-    # coherent proxy for conditional correction (dynamic circuit 대체)
-    feedback: bool = False
-
-    # which data qubit to flip when syndrome=1
-    correct_target: int = 0  # 0 or 1
+    # Inject a single deterministic X error on a chosen data qubit.
+    inject_x: bool = False
+    inject_target: int = 0  # data qubit index: 0,1,2
+    inject_cycle: int = 0   # which syndrome-extraction cycle to inject at
 
 
-def make_topo_hook(p: TopoMinimalParams) -> ScenarioHook:
-    """
-    parity encode: CX(0->2), CX(1->2)
-    optional feedback: CX(2->target)
-    optional uncompute: CX(1->2), CX(0->2)
-    """
-    if p.correct_target not in (0, 1):
-        raise ValueError(f"correct_target must be 0 or 1, got {p.correct_target}")
+def make_inject_x_hook(p: TopoMinimalParams) -> ScenarioHook:
+    if p.inject_target not in (0, 1, 2):
+        raise ValueError(f"inject_target must be 0,1,2; got {p.inject_target}")
+    if p.inject_cycle < 0:
+        raise ValueError(f"inject_cycle must be >= 0; got {p.inject_cycle}")
 
     def hook(qc: QuantumCircuit, k: int) -> None:
-        reps = max(1, p.check_reps)
-        for _ in range(reps):
-            qc.cx(0, 2)
-            qc.cx(1, 2)
-
-            if p.feedback:
-                qc.cx(2, p.correct_target)
-
-            if p.uncompute:
-                qc.cx(1, 2)
-                qc.cx(0, 2)
+        if not p.inject_x:
+            return
+        if k == p.inject_cycle:
+            qc.x(p.inject_target)
 
     return hook
 
 
 def make_hooks(args=None) -> Tuple[Hook, Hook, Hook]:
     """
-    Returns:
-    S2a: constraint only
-    S2b: constraint + coherent feedback
-    S2_log: logging only (decoded/S3용; feedback 없음, uncompute 없음)
+    Backward-compatible helper returning 3 hooks:
+    - S2a: no injection (baseline)
+    - S2b: inject a single X error at cycle 0 on data qubit 0
+    - log: same as baseline (core already logs syndrome)
+    """
+    h_a = make_inject_x_hook(TopoMinimalParams(inject_x=False))
+    h_b = make_inject_x_hook(TopoMinimalParams(inject_x=True, inject_target=0, inject_cycle=0))
+    h_log = make_inject_x_hook(TopoMinimalParams(inject_x=False))
+    return (h_a, h_b, h_log)
+
+
+@dataclass(frozen=True)
+class RotatingBufferParams:
+    """
+    "Rotating buffer" collector (3+1 physical qubits).
+
+    The buffer q3 sequentially couples to data qubits q0->q1->q2, and is measured only once at the end.
+    This can create time-delayed correlations that act like a longer "virtual" interaction path.
     """
 
-    # S2a: constraint only
-    p_a = TopoMinimalParams(
-        check_reps=1,
-        uncompute=True,
-        feedback=False,
-        correct_target=0,
-    )
+    logical_state: str = "0"
+    n_cycles: int = 5
 
-    # S2b: constraint + feedback
-    p_b = TopoMinimalParams(
-        check_reps=1,
-        uncompute=True,
-        feedback=True,
-        correct_target=0,
-    )
+    # Strong exchange coupling angle for XX+YY interaction (iSWAP-like).
+    exchange_theta: float = 1.5707963267948966  # pi/2
 
-    # S2_log: syndrome logging only
-    # - feedback 없음 (decoder가 밖에서 처리)
-    # - uncompute=False로 ancilla에 패리티 흔적을 남겨 로그가 안정적으로 나오게 함
-    p_log = TopoMinimalParams(
-        check_reps=1,
-        uncompute=False,
-        feedback=False,
-        correct_target=0,
-    )
+    # Optional detuning phase applied to the buffer between couplings.
+    detuning_phase: float = 0.0
 
-    return (
-        make_topo_hook(p=p_a),
-        make_topo_hook(p=p_b),
-        make_topo_hook(p=p_log),
-    )
+    # Optional dynamical-decoupling X pulses on the buffer.
+    dd_pulses: int = 0
+
+    # Measure buffer in X basis if True.
+    measure_buffer_in_x: bool = True
+
+
+def build_rotating_buffer_circuit(p: RotatingBufferParams) -> QuantumCircuit:
+    """
+    Circuit layout:
+    - q0,q1,q2: data (repetition code block)
+    - q3: buffer (collector / bus)
+
+    Classical:
+    - c0: buffer measurement
+    - d0..d2: final data measurements
+    """
+    qc = QuantumCircuit(4, 4)
+
+    prepare_logical_state(qc, p.logical_state)
+    encode_repetition_3(qc)
+
+    buf = 3
+
+    for _k in range(int(p.n_cycles)):
+        # Buffer sequentially couples to each data qubit.
+        for data in (0, 1, 2):
+            qc.append(XXPlusYYGate(float(p.exchange_theta), 0.0), [data, buf])
+            if p.detuning_phase:
+                qc.rz(float(p.detuning_phase), buf)
+            for _ in range(max(0, int(p.dd_pulses))):
+                qc.x(buf)
+                qc.id(buf)
+
+    if p.measure_buffer_in_x:
+        qc.h(buf)
+    qc.measure(buf, 0)
+
+    qc.measure(0, 1)
+    qc.measure(1, 2)
+    qc.measure(2, 3)
+    return qc
