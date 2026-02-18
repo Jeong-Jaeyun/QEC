@@ -1,0 +1,2 @@
+logical_state,n_rounds,k,measurement_rounds,shots_total,batch_M,sigma_z,tau_int,zeta,p_m,p_r,metric,weighted_mean_p,simple_mean_p,weighted_minus_simple,slope_p_vs_abs_delta,corr_p_vs_abs_delta
+0,2,2,1,32,4,0.01,1.0,0.01,0.0,0.0,qec,0.0,0.0,0.0,0.0,0.0

@@ -1,0 +1,2 @@
+mode,k,shots,max_rounds,logical_failure_prob,survival_prob,lifetime_time,lifetime_time_median,lifetime_time_ci_low,lifetime_time_ci_high,lifetime_rounds,avg_measurements_to_fail,measurement_efficiency
+naive_sparse,2,50,4,0.04,0.96,3.96,4.0,3.905131429761657,4.0148685702383435,3.96,1.96,2.020408163265306

@@ -1,0 +1,4 @@
+type,safe_count,total_points,safe_fraction,zeta,chi_boundary_min
+overview,2,4,0.5,,
+boundary,,,,0.0003,0.0
+boundary,,,,0.014999999999999998,0.0
