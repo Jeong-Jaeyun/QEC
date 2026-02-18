@@ -1,6 +1,6 @@
 import unittest
+import importlib.util
 
-from core.circuit import CoreParams, build_core_circuit_with_syndrome
 from utils.logging import (
     apply_x_correction,
     decode_logical_bit_majority,
@@ -9,6 +9,8 @@ from utils.logging import (
     score_logical_success,
     score_raw_majority_success,
 )
+
+_QISKIT_AVAILABLE = importlib.util.find_spec("qiskit") is not None
 
 
 class TestRepetitionCode(unittest.TestCase):
@@ -47,6 +49,10 @@ class TestRepetitionCode(unittest.TestCase):
         self.assertEqual(score_logical_success(counts, n_cycles=1, ideal_logical="0"), 1.0)
 
     def test_circuit_shapes(self):
+        if not _QISKIT_AVAILABLE:
+            self.skipTest("qiskit is not installed")
+        from core.circuit import CoreParams, build_core_circuit_with_syndrome
+
         p = CoreParams(n_cycles=2, idle_ticks_data=0, idle_ticks_anc=0, logical_state="0")
         qc = build_core_circuit_with_syndrome(p, n_cycles=p.n_cycles, measure_data=True)
         self.assertEqual(qc.num_qubits, 4)
@@ -55,4 +61,3 @@ class TestRepetitionCode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
