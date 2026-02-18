@@ -39,6 +39,12 @@ class NoiseParams:
     ro_anc: float = 0.01
     ro_data: float = 0.0
 
+    # reset error probability on reset instruction.
+    # For bitflip channel this is modeled as X-after-reset.
+    # For depolarizing channel this is modeled as 1Q depolarizing-after-reset.
+    reset_anc: float = 0.0
+    reset_data: float = 0.0
+
     # optional: additional "attack" noise on ancilla (implemented via extra id ticks in circuit)
     # but the strength is controlled here via pid_anc or p1_anc, so it actually changes physics.
 
@@ -133,5 +139,24 @@ def build_noise_model(np_: NoiseParams,
         ro = ReadoutError([[1 - p, p], [p, 1 - p]])
         for q in data_qubits:
             nm.add_readout_error(ro, [q])
+
+    # reset error channel
+    if np_.reset_data and np_.reset_data > 0:
+        p = float(np_.reset_data)
+        if np_.channel == "bitflip":
+            ereset_data = pauli_error([("X", p), ("I", 1.0 - p)])
+        else:
+            ereset_data = depolarizing_error(p, 1)
+        for q in data_qubits:
+            nm.add_quantum_error(ereset_data, "reset", [q])
+
+    if np_.reset_anc and np_.reset_anc > 0:
+        p = float(np_.reset_anc)
+        if np_.channel == "bitflip":
+            ereset_anc = pauli_error([("X", p), ("I", 1.0 - p)])
+        else:
+            ereset_anc = depolarizing_error(p, 1)
+        for q in anc_qubits:
+            nm.add_quantum_error(ereset_anc, "reset", [q])
 
     return nm

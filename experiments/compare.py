@@ -54,6 +54,8 @@ def _make_noise(base: NoiseParams, link_mult: float, inject_link: bool = True) -
         pid_anc=base.pid_anc,
         ro_anc=base.ro_anc,
         ro_data=base.ro_data,
+        reset_anc=base.reset_anc,
+        reset_data=base.reset_data,
     )
 
 
@@ -80,6 +82,8 @@ def run_decoded_sweep(args) -> None:
         pid_anc=args.pid_anc,
         ro_anc=args.ro_anc,
         ro_data=args.ro_data,
+        reset_anc=args.reset_anc,
+        reset_data=args.reset_data,
     )
 
     xs = args.link_mults
@@ -162,6 +166,8 @@ def run_state_sweep(args) -> None:
         pid_anc=args.pid_anc,
         ro_anc=args.ro_anc,
         ro_data=args.ro_data,
+        reset_anc=args.reset_anc,
+        reset_data=args.reset_data,
     )
 
     xs = args.link_mults
@@ -234,6 +240,8 @@ def parse_args():
     p.add_argument("--pid_anc", type=float, default=0.001)
     p.add_argument("--ro_anc", type=float, default=0.01)
     p.add_argument("--ro_data", type=float, default=0.0)
+    p.add_argument("--reset_anc", type=float, default=0.0)
+    p.add_argument("--reset_data", type=float, default=0.0)
 
     # sweep
     p.add_argument("--link_mults", type=float, nargs="+", default=[1.0, 1.5, 2.0, 3.0, 5.0, 8.0, 12.0])
